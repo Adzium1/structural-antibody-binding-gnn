@@ -1,102 +1,56 @@
 # 3D GNN for Antibody–Antigen ΔΔG Prediction
 
-Predicting how point mutations change antibody–antigen binding affinity (ΔΔG) is central to affinity maturation and developability. This repo explores how far you can go with **simple sequence/linear models** and what extra signal you actually gain from a **3D graph neural network over the interface**.
+The accurate prediction of changes in binding free energy ($\Delta\Delta G$) upon point mutation is a cornerstone of computational antibody engineering and affinity maturation. While structural Deep Learning has gained prominence, distinguishing the inductive bias provided by 3D geometry from signal inherent in sequence and physicochemical properties remains a challenge.This repository implements a rigorous comparative framework to evaluate the predictive performance of 3D Graph Neural Networks (GNNs) against robust linear and sequence-based baselines. The primary objective is to quantify the marginal gain of modeling the antibody–antigen interface as a graph, focusing on the AB-Bind dataset and extending to SKEMPI 2.0 for generalizability.
 
-## 1. Problem
+Given a wild-type antibody–antigen complex with a resolved 3D structure (PDB) and a specific single-point mutation (defined by chain, residue index, wild-type amino acid $\to$ mutant amino acid). The objective is to predict the scalar change in binding free energy:
+$$\Delta\Delta G = \Delta G_{\text{mutant}} - \Delta G_{\text{wild-type}}$$
 
-Given:
+A negative $\Delta\Delta G$ typically indicates improved affinity (stabilization), while a positive value indicates destabilization.
 
-- A **wild-type antibody–antigen complex** with a known 3D structure (PDB).
-- A **mutation** (chain, residue index, WT AA → mutant AA).
+## Methodology: A Hierarchical Modeling Approach
+To ensure that performance gains are attributable to structural reasoning rather than data leakage or simple residue propensities, this project employs a two-stage modeling strategy.
 
-Predict the **change in binding free energy**: We train and evaluate primarily on the **AB-Bind** database (1101 mutants across 32 antibody–antigen complexes) and optionally extend to SKEMPI 2.0 (7085 mutants on general PPIs).
+### The Linear and Sequence-Based Baseline
+Before implementing geometric deep learning, we establish a "lower bound" of performance using interpretable linear models (Linear/Logistic Regression) and tree-based ensembles (Random Forest/XGBoost).
+Rationale:
+- Leakage Detection: Historical benchmarks on datasets like SKEMPI have frequently suffered from data leakage, where models memorize complex-specific biases rather than learning biophysical rules1.High performance by a linear model often indicates improper train/test splits (e.g., random splitting rather than complex-level splitting).
+- Signal Quantification: Recent studies suggest that sequence-only and simple statistical features can achieve significant correlations in $\Delta\Delta G$ prediction tasks2. This baseline quantifies how much variance in the AB-Bind dataset can be explained by residue identity and physicochemical descriptors alone, without explicit 3D coordinates.
+- Interpretability: Linear weights provide immediate sanity checks regarding physicochemical intuition (e.g., penalties for burying hydrophilic residues or introducing steric clashes via volume changes).Feature Engineering:Wild-type and Mutant amino acid identities (One-Hot).Physicochemical property shifts (Volume, Hydrophobicity, Charge, Polarity).Interface vs. Non-interface positioning flags.
 
-## 2. Why two stages: linear baseline → 3D GNN?
+### Feature Engineering:
 
-### Stage 1 – Linear / sequence-level baseline
+- Wild-type and Mutant amino acid identities (One-Hot).
+- Physicochemical property shifts (Volume, Hydrophobicity, Charge, Polarity).
+- Interface vs. Non-interface positioning flags.
 
-Before touching 3D structure, we train simple models (linear regression / logistic regression / tree-based) on **sequence- and mutation-level features**:
+### 3D Graph Neural Network (GNN) on the Interface
 
-- WT and mutant amino acids, position, chain, interface flag, simple physicochemical descriptors.
-- Optionally per-complex intercepts.
+Upon validation of the dataset splits and baselines, we implement a geometric deep learning architecture.
+Graph Construction:Following the philosophy of frameworks such as DeepRank-GNN3, the protein interface is transformed into a graph $\mathcal{G} = (\mathcal{V}, \mathcal{E})$:
+- Nodes ($\mathcal{V}$): Interface residues (defined by a distance cutoff, typically 8-10 Å) from both the Antibody and Antigen. Features include amino acid type, chain logic (Ab/Ag), and atomic coordinates.
+- Edges ($\mathcal{E}$): Spatial neighbors within the defined cutoff. Edges are annotated with Euclidean distances and categorical flags for intra-chain vs. inter-chain interactions.
 
-Why bother?
+  Architecture:
+  - A message-passing GNN (e.g., Graph Convolutional Networks or Graph Attention Networks) propagates features across the interface graph.
+  - The architecture specifically encodes the mutation site, allowing the network to learn the localized perturbation in the structural environment.
+  - The readout layer pools node representations to regress the scalar $\Delta\Delta G$.
+ 
+## Datasets and Curation
 
-1. **Debugging & leakage check**  
-   If a linear model with these features already gets suspiciously high performance on ΔΔG, the problem is probably in the **splits or features**, not in the architecture. This is exactly what has happened historically on SKEMPI-style benchmarks when complex-level leakage wasn’t controlled. :contentReference[oaicite:1]{index=1}  
+AB-Bind
+- Source: Sirin et al., AB-Bind: Antibody binding mutational database for computational affinity predictions
+- Composition: 1,101 mutants across 32 unique antibody–antigen complexes with experimentally determined $\Delta\Delta G$ values.
+- Processing: Raw data is sourced via submodule from data/external/AB-Bind-Database. Processed data (data/processed/ab_bind_with_labels.csv) includes PDB IDs, chain mappings, normalized mutation strings, and discrete labels (Improved/Neutral/Worsened) for classification tasks.
 
-2. **Quantify the “easy” signal**  
-   Sequence-only and simple statistical features can already reach decent correlations on ΔΔG prediction.:contentReference[oaicite:2]{index=2}  
-   The baseline tells us **how much of AB-Bind can be explained without any 3D geometry**.
+SKEMPI 2.0
+- Source: Jankauskaite et al., SKEMPI 2.0: an updated benchmark of changes in protein–protein binding energy
+- Composition: 7,085 mutants covering a diverse range of general protein–protein interactions (PPIs).
+- Utility: Used to assess the transferability of features learned on antibody interfaces to general PPIs.
 
-3. **Interpretability**  
-   Linear weights over amino-acid changes and positions give direct sanity checks:  
-   “does mutating buried hydrophobics to charged residues look strongly destabilizing?” etc.
+  ## References
 
-If the linear/sequence model already explains most of the variance, then a fancy 3D GNN is probably overkill or mis-specified; if it hits a clear ceiling, that’s the justification for stage 2.
-
-### Stage 2 – 3D Graph Neural Network on the interface
-
-Once the dataset, features and **complex-level train/val/test splits** are trustworthy, we move to a **3D GNN**:
-
-- Build **residue-level graphs** from PDBs:
-  - Nodes = interface residues (Ab + Ag) with AA type, chain/role, coordinates, basic physicochemical features.
-  - Edges = spatial neighbors within a cutoff, annotated with distances and intra- vs inter-chain flags.
-- For each mutation, mark the mutated residue node and encode WT/MT identity.
-- Run a message-passing GNN (GraphConv / GAT-style) over the interface graph, then pool to predict ΔΔG.
-
-This follows the same philosophy as frameworks like **DeepRank-GNN**, which convert protein–protein interfaces into graphs and train GNNs to learn interaction patterns. :contentReference[oaicite:3]{index=3}  
-
-## 3. Data
-
-### AB-Bind
-
-- Source: Sirin et al., *AB-Bind: Antibody binding mutational database for computational affinity predictions*. :contentReference[oaicite:4]{index=4}  
-- 1101 mutants across 32 antibody–antigen complexes with experimental ΔΔG.  
-- Repo: `data/external/AB-Bind-Database/AB-Bind_experimental_data.csv` (added as git submodule).
-
-We provide:
-
-- `data/processed/ab_bind_with_labels.csv` – cleaned version with:
-  - PDB ID, chain partners, mutation string, ΔΔG in kcal/mol.
-  - Discrete labels (improved / neutral / worsened) for classification / ranking.
-
-### SKEMPI 2.0 (optional extension)
-
-- Source: Jankauskaite et al., *SKEMPI 2.0: an updated benchmark of changes in protein–protein binding energy…*. :contentReference[oaicite:5]{index=5}  
-- 7085 mutants on diverse PPIs, with affinities and ΔΔG.  
-- Downloaded into `data/raw/skempi2/` via a small script.
-
-SKEMPI is mainly used to check whether patterns learned on antibody–antigen interfaces transfer to more general protein–protein interfaces.
-
-## 4. Experiments
-### EDA & dataset curation
-
-- Inspect ΔΔG distribution, class imbalance, per-complex heterogeneity.
-- Define complex_id and create complex-level train/val/test splits.
-- Sequence / linear baselines
-- Feature engineering at mutation + sequence level.
-
-### Linear regression / logistic regression / tree-based models.
-- Metrics: Pearson/Spearman, MAE, ROC-AUC / PR-AUC for improved vs others, within-complex ranking.
-
-### 3D GNN
-
-- Build and cache interface graphs from PDBs.
-- Implement message-passing GNN over mutation-annotated graphs.
-- Same metrics and splits as baselines.
-
-### Analysis
-
-- Compare GNN vs baseline under strict splits.
-- Case studies on specific complexes (e.g. 1T83, 1MHP) to inspect where 3D geometry helps or fails.
-- Ablations (remove 3D features, use sequence embeddings only, etc.).
-
-## 5. References
-
-1. Sirin et al., AB-Bind: Antibody binding mutational database for computational affinity predictions, Protein Sci 2016. 
-2. Jankauskaite et al., SKEMPI 2.0: an updated benchmark of changes in protein–protein binding energy, kinetics and thermodynamics upon mutation, Bioinformatics 2019.
-3. Réau et al., DeepRank-GNN: a graph neural network framework to learn patterns in protein–protein interfaces, Bioinformatics 2023.
-4. Huang et al., SSIPe: accurately estimating protein–protein binding affinity change upon mutation, Bioinformatics 2020 (example of structure-based ΔΔG prediction).
-5. ProAffiMuSeq: sequence-based prediction of protein-protein binding affinity change upon mutation (example of strong sequence-only baseline).
-
+1. Geng, C., et al. (2019). ISPRED4: interaction sites PREDiction in protein structures with a refinement strategy. Bioinformatics. (Context: Evaluation of leakage in PPI datasets).
+2. Dehghanpoor, R., et al. (2018). ProAffiMuSeq: sequence-based prediction of protein-protein binding affinity change upon mutation. Bioinformatics.
+3. Réau, M., et al. (2023). DeepRank-GNN: a graph neural network framework to learn patterns in protein–protein interfaces. Bioinformatics.
+4. Sirin, S., et al. (2016). AB-Bind: Antibody binding mutational database for computational affinity predictions. Protein Science.
+5. Jankauskaite, J., et al. (2019). SKEMPI 2.0: an updated benchmark of changes in protein–protein binding energy, kinetics and thermodynamics upon mutation. Bioinformatics.****
