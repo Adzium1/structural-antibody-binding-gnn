@@ -68,6 +68,7 @@ def build_graph(
     ab_chains, ag_chains = parse_partner_groups(str(row.get("partners", "")))
     node_features = []
     node_positions = []
+    solvent_props = []
     for idx in node_indices:
         residue = structure.residues[idx]
         one_hot = [
@@ -127,6 +128,7 @@ def build_graph(
                 coords.astype(float),
             ]
         )
+        solvent_props.append(solvent_proxy)
         node_features.append(feature_vector)
         node_positions.append(coords)
 
@@ -135,9 +137,11 @@ def build_graph(
     n_nodes = node_features.shape[0]
     edges: list[tuple[int, int]] = []
     weights: list[float] = []
+    edge_attr: list[list[float]] = []
     for i in range(n_nodes):
         edges.append((i, i))
         weights.append(1.0)
+        edge_attr.append([0.0, 0.0, 0.0, 0.0])
     for i in range(n_nodes):
         for j in range(i + 1, n_nodes):
             dist = float(np.linalg.norm(node_positions[i] - node_positions[j]))
@@ -147,9 +151,21 @@ def build_graph(
                 weights.append(weight)
                 edges.append((j, i))
                 weights.append(weight)
+                solvent_diff = abs(solvent_props[i] - solvent_props[j])
+                chain_flag = (
+                    1.0
+                    if structure.residues[node_indices[i]].chain_id
+                    != structure.residues[node_indices[j]].chain_id
+                    else 0.0
+                )
+                interface_flag = 1.0 if dist <= interface_threshold else 0.0
+                attr = [dist, interface_flag, chain_flag, solvent_diff]
+                edge_attr.append(attr)
+                edge_attr.append(attr)
 
     edge_index = np.array(edges, dtype=int).T
     edge_weight = np.array(weights, dtype=float)
+    edge_attr_arr = np.array(edge_attr, dtype=float)
 
     return {
         "sample_id": int(row["sample_id"]),
@@ -159,6 +175,7 @@ def build_graph(
         "node_features": node_features,
         "edge_index": edge_index,
         "edge_weight": edge_weight,
+        "edge_attr": edge_attr_arr,
     }
 
 

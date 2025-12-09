@@ -24,6 +24,7 @@ class GraphSample(Sequence):
         self.x = torch.as_tensor(data["node_features"], dtype=torch.float32)
         self.edge_index = torch.as_tensor(data["edge_index"], dtype=torch.long)
         self.edge_weight = torch.as_tensor(data["edge_weight"], dtype=torch.float32)
+        self.edge_attr = torch.as_tensor(data["edge_attr"], dtype=torch.float32)
         self.y = torch.tensor(data["y"], dtype=torch.float32)
         self.split = data["split"]
 
@@ -49,27 +50,48 @@ class GraphCollection:
 
 
 class InterfaceGNN(nn.Module):
-    def __init__(self, input_dim: int, hidden_dim: int = 64):
+    def __init__(
+        self,
+        input_dim: int,
+        edge_attr_dim: int,
+        hidden_dim: int = 64,
+        layers: int = 2,
+    ):
         super().__init__()
-        self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim * 2, hidden_dim)
+        self.input_proj = nn.Linear(input_dim, hidden_dim)
+        self.edge_mlp = nn.Sequential(
+            nn.Linear(edge_attr_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
         self.att_src = nn.Linear(hidden_dim, hidden_dim)
         self.att_dst = nn.Linear(hidden_dim, hidden_dim)
+        self.msg_lin = nn.Linear(hidden_dim, hidden_dim)
+        self.res_lin = nn.Linear(hidden_dim, hidden_dim)
         self.readout = nn.Linear(hidden_dim, 1)
+        self.layers = layers
 
-    def forward(self, x: torch.Tensor, edge_index: torch.Tensor, edge_weight: torch.Tensor) -> torch.Tensor:
-        h = F.relu(self.fc1(x))
-        n_nodes = x.size(0)
-        src = h[edge_index[0]]
-        dst = h[edge_index[1]]
-        att_scores = torch.sigmoid(
-            (self.att_src(src) * self.att_dst(dst)).sum(dim=1)
-        )
-        weights = edge_weight * att_scores
-        adj = torch.sparse_coo_tensor(edge_index, weights, (n_nodes, n_nodes))
-        agg = torch.sparse.mm(adj.coalesce(), h)
-        h = torch.cat([h, agg], dim=-1)
-        h = F.relu(self.fc2(h))
+    def forward(
+        self,
+        x: torch.Tensor,
+        edge_index: torch.Tensor,
+        edge_weight: torch.Tensor,
+        edge_attr: torch.Tensor,
+    ) -> torch.Tensor:
+        h = self.input_proj(x)
+        for _ in range(self.layers):
+            h = F.relu(h)
+            src = h[edge_index[0]]
+            dst = h[edge_index[1]]
+            bias = self.edge_mlp(edge_attr)
+            att = torch.sigmoid(
+                (self.att_src(src) + self.att_dst(dst) + bias).sum(dim=1, keepdim=True)
+            )
+            weight = edge_weight.unsqueeze(-1)
+            msg = self.msg_lin(src) * att * weight
+            agg = torch.zeros_like(h)
+            agg = agg.index_add(0, edge_index[1], msg)
+            h = F.relu(self.res_lin(h + agg))
         graph_rep = h.mean(dim=0)
         return self.readout(graph_rep).squeeze(-1)
 
@@ -80,7 +102,9 @@ def train_epoch(model: nn.Module, graphs: Sequence[GraphSample], optimizer: torc
     criterion = nn.MSELoss()
     for graph in graphs:
         optimizer.zero_grad()
-        pred = model(graph.x, graph.edge_index, graph.edge_weight)
+        pred = model(
+            graph.x, graph.edge_index, graph.edge_weight, graph.edge_attr
+        )
         loss = criterion(pred, graph.y)
         loss.backward()
         optimizer.step()
@@ -94,7 +118,9 @@ def evaluate(model: nn.Module, graphs: Sequence[GraphSample]) -> dict[str, float
     preds: list[float] = []
     with torch.no_grad():
         for graph in graphs:
-            output = model(graph.x, graph.edge_index, graph.edge_weight)
+            output = model(
+                graph.x, graph.edge_index, graph.edge_weight, graph.edge_attr
+            )
             preds.append(float(output.item()))
             truths.append(float(graph.y.item()))
     if not truths:
@@ -154,7 +180,12 @@ def main() -> None:
         raise ValueError("No graphs were loaded. Run src.data.build_interface_graphs first.")
 
     input_dim = sample_graphs[0].x.shape[1]
-    model = InterfaceGNN(input_dim=input_dim, hidden_dim=args.hidden_dim)
+    edge_attr_dim = sample_graphs[0].edge_attr.shape[1]
+    model = InterfaceGNN(
+        input_dim=input_dim,
+        edge_attr_dim=edge_attr_dim,
+        hidden_dim=args.hidden_dim,
+    )
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     epoch_records: list[dict[str, object]] = []
