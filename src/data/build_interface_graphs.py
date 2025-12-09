@@ -26,6 +26,7 @@ DEFAULT_OUTPUT_FILE = OUTPUT_DIR / "ab_bind_graphs.pkl"
 GRAPH_RADIUS = 10.0
 EDGE_RADIUS = 8.0
 INTERFACE_THRESHOLD = 5.0
+SOLVENT_RADIUS = 5.0
 
 
 def build_graph(
@@ -97,6 +98,14 @@ def build_graph(
         dist_center = float(np.linalg.norm(residue.centroid - center_point))
         coords = residue.centroid
 
+        neighbor_solvent = structure.count_neighbors(residue.centroid, SOLVENT_RADIUS)
+        solvent_proxy = 1.0 / (1.0 + neighbor_solvent)
+        heavy_atoms = float(
+            sum(1 for elem, _ in residue.atoms if elem.upper() != "H" and elem != "")
+        )
+        b_factors = [bf for _, bf in residue.atoms]
+        avg_bfactor = float(np.mean(b_factors)) if b_factors else 0.0
+
         feature_vector = np.concatenate(
             [
                 np.array(one_hot, dtype=float),
@@ -109,6 +118,10 @@ def build_graph(
                         dist_center,
                         dist_to_partner if np.isfinite(dist_to_partner) else 0.0,
                     ],
+                    dtype=float,
+                ),
+                np.array(
+                    [solvent_proxy, heavy_atoms, avg_bfactor],
                     dtype=float,
                 ),
                 coords.astype(float),

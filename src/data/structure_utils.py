@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from io import StringIO
 from pathlib import Path
 from typing import Iterable, Iterator, List, Mapping, Sequence, Tuple
 
@@ -41,6 +42,23 @@ SUBPROJECT_ROOT = Path(__file__).resolve().parents[2] / "3D-GNN-over-antibody-an
 PDB_DATABASE_DIR = SUBPROJECT_ROOT / "data" / "external" / "AB-Bind-Database"
 
 
+def _clean_pdb_text(pdb_path: Path) -> str:
+    lines = []
+    with open(pdb_path, "r", encoding="utf-8", errors="ignore") as handle:
+        for raw in handle:
+            if raw.startswith(("ATOM", "HETATM")):
+                line = raw.rstrip("\n")
+                if len(line) < 60:
+                    line = line.ljust(60)
+                occupancy = line[54:60]
+                if not occupancy.strip():
+                    line = line[:54] + "  1.00" + line[60:]
+                lines.append(line + "\n")
+            else:
+                lines.append(raw)
+    return "".join(lines)
+
+
 @dataclass(frozen=True)
 class ResidueDescriptor:
     chain_id: str
@@ -49,6 +67,7 @@ class ResidueDescriptor:
     centroid: np.ndarray
     resname: str
     one_letter: str
+    atoms: tuple[tuple[str, float], ...]
 
 
 class StructureInfo:
@@ -106,8 +125,9 @@ class StructureCache:
         pdb_path = self.pdb_dir / f"{pid}.pdb"
         if not pdb_path.exists():
             raise FileNotFoundError(f"PDB file not found at {pdb_path}")
+        cleaned = _clean_pdb_text(pdb_path)
         try:
-            structure = self._parser.get_structure(pid, str(pdb_path))
+            structure = self._parser.get_structure(pid, StringIO(cleaned))
         except (TypeError, RuntimeError, ValueError) as exc:
             print(f"[WARN] Could not parse {pdb_path}: {exc}")
             info = StructureInfo([])
@@ -125,6 +145,16 @@ class StructureCache:
                 resname = residue.get_resname()
                 one_letter = THREE_TO_ONE_MAP.get(resname, "X")
 
+                atom_info = tuple(
+                    (
+                        (atom.element or "").strip(),
+                        float(atom.get_bfactor())
+                        if atom.get_bfactor() is not None
+                        else 0.0,
+                    )
+                    for atom in residue.get_atoms()
+                )
+
                 resseq = residue.get_id()[1]
                 icode = residue.get_id()[2].strip()
                 residues.append(
@@ -135,6 +165,7 @@ class StructureCache:
                         centroid=centroid,
                         resname=resname,
                         one_letter=one_letter,
+                        atoms=atom_info,
                     )
                 )
 

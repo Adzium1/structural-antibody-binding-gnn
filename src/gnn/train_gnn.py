@@ -53,12 +53,20 @@ class InterfaceGNN(nn.Module):
         super().__init__()
         self.fc1 = nn.Linear(input_dim, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim * 2, hidden_dim)
+        self.att_src = nn.Linear(hidden_dim, hidden_dim)
+        self.att_dst = nn.Linear(hidden_dim, hidden_dim)
         self.readout = nn.Linear(hidden_dim, 1)
 
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor, edge_weight: torch.Tensor) -> torch.Tensor:
         h = F.relu(self.fc1(x))
         n_nodes = x.size(0)
-        adj = torch.sparse_coo_tensor(edge_index, edge_weight, (n_nodes, n_nodes))
+        src = h[edge_index[0]]
+        dst = h[edge_index[1]]
+        att_scores = torch.sigmoid(
+            (self.att_src(src) * self.att_dst(dst)).sum(dim=1)
+        )
+        weights = edge_weight * att_scores
+        adj = torch.sparse_coo_tensor(edge_index, weights, (n_nodes, n_nodes))
         agg = torch.sparse.mm(adj.coalesce(), h)
         h = torch.cat([h, agg], dim=-1)
         h = F.relu(self.fc2(h))
@@ -129,6 +137,12 @@ def parse_arguments() -> argparse.Namespace:
         default=METRICS_PATH,
         help="CSV file to log train/val/test metrics.",
     )
+    parser.add_argument(
+        "--patience",
+        type=int,
+        default=5,
+        help="Early stopping patience (number of epochs without val R² improvement).",
+    )
     return parser.parse_args()
 
 
@@ -144,6 +158,10 @@ def main() -> None:
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     epoch_records: list[dict[str, object]] = []
+    best_val_r2 = float("-inf")
+    best_epoch = 0
+    best_summary: dict[str, object] | None = None
+    no_improve = 0
     for epoch in range(1, args.epochs + 1):
         train_loss = train_epoch(model, dataset.get_split("train"), optimizer)
         epoch_metrics = {"epoch": epoch, "train_loss": train_loss}
@@ -156,8 +174,33 @@ def main() -> None:
                     f"{split}_r2": metrics["r2"],
                 }
             )
+        val_r2 = epoch_metrics["val_r2"]
+        if val_r2 > best_val_r2:
+            best_val_r2 = val_r2
+            best_epoch = epoch
+            best_summary = epoch_metrics.copy()
+            no_improve = 0
+            epoch_metrics["is_best_epoch"] = True
+        else:
+            no_improve += 1
+            epoch_metrics["is_best_epoch"] = False
+
+        print(
+            f"[epoch {epoch}] loss={train_loss:.3f} val_mae={epoch_metrics['val_mae']:.3f} "
+            f"val_r2={val_r2:.3f}"
+        )
+
         epoch_records.append(epoch_metrics)
-        print(f"[epoch {epoch}] loss={train_loss:.3f} val_mae={epoch_metrics['val_mae']:.3f} val_r2={epoch_metrics['val_r2']:.3f}")
+
+        if no_improve >= args.patience:
+            print(f"[INFO] Early stopping after epoch {epoch} (patience={args.patience}).")
+            break
+
+    if best_summary is not None:
+        print(
+            "[INFO] Best epoch %d (val_r2=%.3f, test_mae=%.3f, test_r2=%.3f)"
+            % (best_epoch, best_summary["val_r2"], best_summary["test_mae"], best_summary["test_r2"])
+        )
 
     metrics_df = pd.DataFrame(epoch_records)
     args.metrics_out.parent.mkdir(parents=True, exist_ok=True)
