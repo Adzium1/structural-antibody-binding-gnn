@@ -40,7 +40,7 @@ Graph Construction:Following the philosophy of frameworks such as DeepRank-GNN3,
 AB-Bind
 - Source: Sirin et al., AB-Bind: Antibody binding mutational database for computational affinity predictions
 - Composition: 1,101 mutants across 32 unique antibody–antigen complexes with experimentally determined $\Delta\Delta G$ values.
-- Processing: Raw data is sourced via submodule from data/external/AB-Bind-Database. Processed data (data/processed/ab_bind_with_labels.csv) includes PDB IDs, chain mappings, normalized mutation strings, and discrete labels (Improved/Neutral/Worsened) for classification tasks.
+- Processing: Raw data is sourced via submodule from `3D-GNN-over-antibody-antigen/data/external/AB-Bind-Database`. Processed data (`3D-GNN-over-antibody-antigen/data/processed/ab_bind_with_labels.csv`) includes PDB IDs, chain mappings, normalized mutation strings, and discrete labels (Improved/Neutral/Worsened) for classification tasks.
 
 SKEMPI 2.0
 - Source: Jankauskaite et al., SKEMPI 2.0: an updated benchmark of changes in protein–protein binding energy
@@ -54,3 +54,16 @@ SKEMPI 2.0
 3. Réau, M., et al. (2023). DeepRank-GNN: a graph neural network framework to learn patterns in protein–protein interfaces. Bioinformatics.
 4. Sirin, S., et al. (2016). AB-Bind: Antibody binding mutational database for computational affinity predictions. Protein Science.
 5. Jankauskaite, J., et al. (2019). SKEMPI 2.0: an updated benchmark of changes in protein–protein binding energy, kinetics and thermodynamics upon mutation. Bioinformatics.****
+
+# Reproducible pipeline
+
+Dependencies for the current scripts are declared in `requirements.txt` and include `biopython` and `torch` in addition to the pandas/scikit-learn stack; install them with `pip install -r requirements.txt`.
+
+Enhanced feature engineering adds per-mutation structural context (mutation/neighbor counts, chain type, partner contact density, interface flags, and distance-to-partner) to `3D-GNN-over-antibody-antigen/data/processed/ab_bind_features.csv`.
+
+1. Run `python -m src.data.prepare_ab_bind` to consume `3D-GNN-over-antibody-antigen/data/processed/ab_bind_with_labels.csv`, engineer physicochemical shift statistics plus the structural context above, and build group-consistent train/validation/test splits. The script writes `3D-GNN-over-antibody-antigen/data/processed/ab_bind_features.csv` and `3D-GNN-over-antibody-antigen/data/processed/ab_bind_splits.json`.
+2. Execute `python -m src.data.build_interface_graphs` to parse the PDBs under `data/external/AB-Bind-Database`, retain residues around each mutation, and serialize per-mutation interface graphs to `3D-GNN-over-antibody-antigen/data/graphs/ab_bind_graphs.pkl`.
+3. Use `python -m src.baselines.train_baselines` to fit ridge, random forest, and gradient-boosting regressors on the engineered features; per-split metrics are saved to `3D-GNN-over-antibody-antigen/reports/baseline_metrics.csv`.
+4. Run `python -m src.gnn.train_gnn` to load the serialized graphs, train a lightweight message-passing GNN, and log epoch-level metrics to `3D-GNN-over-antibody-antigen/reports/gnn_metrics.csv`.
+
+Future steps should compare the new GNN metrics against the baselines and extend the structural graphs to SKEMPI 2.0 for transfer evaluation.

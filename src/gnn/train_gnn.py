@@ -1,0 +1,169 @@
+#!/usr/bin/env python
+from __future__ import annotations
+
+import argparse
+import pickle
+from pathlib import Path
+from typing import Sequence
+
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+
+from src.data.structure_utils import SUBPROJECT_ROOT
+
+GRAPH_DATA_PATH = SUBPROJECT_ROOT / "data" / "graphs" / "ab_bind_graphs.pkl"
+METRICS_PATH = SUBPROJECT_ROOT / "reports" / "gnn_metrics.csv"
+
+
+class GraphSample(Sequence):
+    def __init__(self, data: dict):
+        self.x = torch.as_tensor(data["node_features"], dtype=torch.float32)
+        self.edge_index = torch.as_tensor(data["edge_index"], dtype=torch.long)
+        self.edge_weight = torch.as_tensor(data["edge_weight"], dtype=torch.float32)
+        self.y = torch.tensor(data["y"], dtype=torch.float32)
+        self.split = data["split"]
+
+    def __getitem__(self, idx):
+        return (self.x[idx], self.edge_index[idx], self.edge_weight[idx])
+
+    def __len__(self):
+        return int(self.x.shape[0])
+
+
+class GraphCollection:
+    def __init__(self, path: Path):
+        with open(path, "rb") as handle:
+            raw_graphs = pickle.load(handle)
+        self.graphs = [GraphSample(graph) for graph in raw_graphs]
+        self.split_index = {"train": [], "val": [], "test": []}
+        for graph in self.graphs:
+            if graph.split in self.split_index:
+                self.split_index[graph.split].append(graph)
+
+    def get_split(self, split: str) -> list[GraphSample]:
+        return self.split_index.get(split, [])
+
+
+class InterfaceGNN(nn.Module):
+    def __init__(self, input_dim: int, hidden_dim: int = 64):
+        super().__init__()
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim * 2, hidden_dim)
+        self.readout = nn.Linear(hidden_dim, 1)
+
+    def forward(self, x: torch.Tensor, edge_index: torch.Tensor, edge_weight: torch.Tensor) -> torch.Tensor:
+        h = F.relu(self.fc1(x))
+        n_nodes = x.size(0)
+        adj = torch.sparse_coo_tensor(edge_index, edge_weight, (n_nodes, n_nodes))
+        agg = torch.sparse.mm(adj.coalesce(), h)
+        h = torch.cat([h, agg], dim=-1)
+        h = F.relu(self.fc2(h))
+        graph_rep = h.mean(dim=0)
+        return self.readout(graph_rep).squeeze(-1)
+
+
+def train_epoch(model: nn.Module, graphs: Sequence[GraphSample], optimizer: torch.optim.Optimizer) -> float:
+    model.train()
+    losses: list[float] = []
+    criterion = nn.MSELoss()
+    for graph in graphs:
+        optimizer.zero_grad()
+        pred = model(graph.x, graph.edge_index, graph.edge_weight)
+        loss = criterion(pred, graph.y)
+        loss.backward()
+        optimizer.step()
+        losses.append(float(loss.item()))
+    return float(np.mean(losses)) if losses else 0.0
+
+
+def evaluate(model: nn.Module, graphs: Sequence[GraphSample]) -> dict[str, float]:
+    model.eval()
+    truths: list[float] = []
+    preds: list[float] = []
+    with torch.no_grad():
+        for graph in graphs:
+            output = model(graph.x, graph.edge_index, graph.edge_weight)
+            preds.append(float(output.item()))
+            truths.append(float(graph.y.item()))
+    if not truths:
+        return {"mae": float("nan"), "rmse": float("nan"), "r2": float("nan")}
+    mae = mean_absolute_error(truths, preds)
+    rmse = mean_squared_error(truths, preds, squared=False)
+    r2 = r2_score(truths, preds)
+    return {"mae": mae, "rmse": rmse, "r2": r2}
+
+
+def parse_arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Train a simple GNN on AB-Bind interface graphs.")
+    parser.add_argument(
+        "--graphs",
+        type=Path,
+        default=GRAPH_DATA_PATH,
+        help="Pickle file produced by src.data.build_interface_graphs",
+    )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=30,
+        help="Number of training epochs.",
+    )
+    parser.add_argument(
+        "--hidden-dim",
+        type=int,
+        default=64,
+        help="Hidden dimension for the message-passing layers.",
+    )
+    parser.add_argument(
+        "--lr",
+        type=float,
+        default=1e-3,
+        help="Learning rate for Adam optimizer.",
+    )
+    parser.add_argument(
+        "--metrics-out",
+        type=Path,
+        default=METRICS_PATH,
+        help="CSV file to log train/val/test metrics.",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_arguments()
+    dataset = GraphCollection(args.graphs)
+    sample_graphs = dataset.graphs
+    if not sample_graphs:
+        raise ValueError("No graphs were loaded. Run src.data.build_interface_graphs first.")
+
+    input_dim = sample_graphs[0].x.shape[1]
+    model = InterfaceGNN(input_dim=input_dim, hidden_dim=args.hidden_dim)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+
+    epoch_records: list[dict[str, object]] = []
+    for epoch in range(1, args.epochs + 1):
+        train_loss = train_epoch(model, dataset.get_split("train"), optimizer)
+        epoch_metrics = {"epoch": epoch, "train_loss": train_loss}
+        for split in ("train", "val", "test"):
+            metrics = evaluate(model, dataset.get_split(split))
+            epoch_metrics.update(
+                {
+                    f"{split}_mae": metrics["mae"],
+                    f"{split}_rmse": metrics["rmse"],
+                    f"{split}_r2": metrics["r2"],
+                }
+            )
+        epoch_records.append(epoch_metrics)
+        print(f"[epoch {epoch}] loss={train_loss:.3f} val_mae={epoch_metrics['val_mae']:.3f} val_r2={epoch_metrics['val_r2']:.3f}")
+
+    metrics_df = pd.DataFrame(epoch_records)
+    args.metrics_out.parent.mkdir(parents=True, exist_ok=True)
+    metrics_df.to_csv(args.metrics_out, index=False)
+    print(f"[INFO] Saved GNN metrics to {args.metrics_out}")
+
+
+if __name__ == "__main__":
+    main()
