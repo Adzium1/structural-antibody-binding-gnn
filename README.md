@@ -65,5 +65,6 @@ Enhanced feature engineering adds per-mutation structural context (mutation/neig
 2. Execute `python -m src.data.build_interface_graphs` to parse the PDBs under `data/external/AB-Bind-Database`, retain residues around each mutation, and serialize per-mutation interface graphs (with solvent proxies, atomic counts, and B-factor cues) to `3D-GNN-over-antibody-antigen/data/graphs/ab_bind_graphs.pkl`. The parser now preprocesses files like `3nps.pdb` to fill missing occupancy columns so every structure yields features.
 3. Use `python -m src.baselines.train_baselines` to fit ridge, random forest, and gradient-boosting regressors on the engineered features; per-split metrics are saved to `3D-GNN-over-antibody-antigen/reports/baseline_metrics.csv`.
 4. Run `python -m src.gnn.train_gnn` (optionally pass `--patience N` for early stopping) to load the serialized graphs, train a lightweight attention-weighted message-passing GNN, and log epoch-level metrics to `3D-GNN-over-antibody-antigen/reports/gnn_metrics.csv`.
+5. Execute `python -m src.analysis.compare_metrics` to summarize the test MAE/R² table alongside the best GNN epoch and to persist `3D-GNN-over-antibody-antigen/reports/comparison_plot.png`.
 
 Future steps should compare the new GNN metrics against the baselines and extend the structural graphs to SKEMPI 2.0 for transfer evaluation.
