@@ -5,7 +5,7 @@ import argparse
 import json
 import pickle
 from pathlib import Path
-from typing import Sequence
+from typing import Sequence, Callable
 
 import numpy as np
 import pandas as pd
@@ -14,11 +14,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.preprocessing import StandardScaler
+import joblib
 
 from src.data.structure_utils import SUBPROJECT_ROOT
 
 GRAPH_DATA_PATH = SUBPROJECT_ROOT / "data" / "graphs" / "ab_bind_graphs.pkl"
 METRICS_PATH = SUBPROJECT_ROOT / "reports" / "gnn_metrics.csv"
+SCALER_PATH = SUBPROJECT_ROOT / "reports" / "ddg_scaler.pkl"
 
 EDGE_ATTR_BACKFILL_WARNED = False
 
@@ -158,12 +161,12 @@ def train_epoch(
     model: nn.Module,
     graphs: Sequence[GraphSample],
     optimizer: torch.optim.Optimizer,
+    criterion: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
     track_grads: bool = False,
 ) -> tuple[float, dict[str, dict[str, float]]]:
     model.train()
     losses: list[float] = []
     grad_stats: dict[str, dict[str, float]] = {}
-    criterion = nn.MSELoss()
     for graph in graphs:
         optimizer.zero_grad()
         pred = model(
@@ -179,7 +182,11 @@ def train_epoch(
     return mean_loss, grad_stats
 
 
-def evaluate(model: nn.Module, graphs: Sequence[GraphSample]) -> dict[str, float]:
+def evaluate(
+    model: nn.Module,
+    graphs: Sequence[GraphSample],
+    scaler: StandardScaler | None = None,
+) -> dict[str, float]:
     model.eval()
     truths: list[float] = []
     preds: list[float] = []
@@ -192,10 +199,47 @@ def evaluate(model: nn.Module, graphs: Sequence[GraphSample]) -> dict[str, float
             truths.append(float(graph.y.item()))
     if not truths:
         return {"mae": float("nan"), "rmse": float("nan"), "r2": float("nan")}
-    mae = mean_absolute_error(truths, preds)
-    rmse = mean_squared_error(truths, preds, squared=False)
-    r2 = r2_score(truths, preds)
+    preds_arr = np.array(preds)
+    truths_arr = np.array(truths)
+    if scaler is not None:
+        preds_arr = scaler.inverse_transform(preds_arr.reshape(-1, 1)).flatten()
+        truths_arr = scaler.inverse_transform(truths_arr.reshape(-1, 1)).flatten()
+    mae = mean_absolute_error(truths_arr, preds_arr)
+    rmse = mean_squared_error(truths_arr, preds_arr, squared=False)
+    r2 = r2_score(truths_arr, preds_arr)
     return {"mae": mae, "rmse": rmse, "r2": r2}
+
+
+class DistributionWeightedMSE(nn.Module):
+    def __init__(self, mean: float, std: float):
+        super().__init__()
+        self.mean = float(mean)
+        self.std = float(max(std, 1e-6))
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        weights = torch.exp(-((target - self.mean) ** 2) / (2 * (self.std ** 2)))
+        return torch.mean(weights * (pred - target) ** 2)
+
+
+def build_loss_fn(train_targets: np.ndarray, loss_type: str) -> nn.Module:
+    if loss_type == "dist_weighted":
+        return DistributionWeightedMSE(train_targets.mean(), train_targets.std())
+    return nn.MSELoss()
+
+
+def standardize_dataset_targets(dataset: GraphCollection) -> StandardScaler:
+    train_graphs = dataset.get_split("train")
+    if not train_graphs:
+        raise ValueError("No training graphs available for target standardization.")
+    train_targets = torch.stack([g.y for g in train_graphs]).numpy().reshape(-1, 1)
+    scaler = StandardScaler().fit(train_targets)
+    for graph in dataset.graphs:
+        scaled = scaler.transform(graph.y.numpy().reshape(-1, 1)).flatten()
+        graph.y = torch.tensor(scaled, dtype=torch.float32)
+    SCALER_PATH.parent.mkdir(parents=True, exist_ok=True)
+    joblib.dump(scaler, SCALER_PATH)
+    print(f"[INFO] Saved target scaler to {SCALER_PATH}")
+    return scaler
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -247,6 +291,19 @@ def parse_arguments() -> argparse.Namespace:
         type=int,
         default=20,
         help="Early stopping patience (number of epochs without val R² improvement).",
+    )
+    parser.add_argument(
+        "--standardize-targets",
+        action="store_true",
+        default=True,
+        help="Standardize ddG targets using train split statistics.",
+    )
+    parser.add_argument(
+        "--loss-type",
+        type=str,
+        choices=["mse", "dist_weighted"],
+        default="mse",
+        help="Loss function variant.",
     )
     return parser.parse_args()
 
@@ -356,6 +413,10 @@ def main() -> None:
     if not sample_graphs:
         raise ValueError("No graphs were loaded. Run src.data.build_interface_graphs first.")
 
+    scaler: StandardScaler | None = None
+    if args.standardize_targets:
+        scaler = standardize_dataset_targets(dataset)
+
     input_dim = sample_graphs[0].x.shape[1]
     edge_attr_dim = sample_graphs[0].edge_attr.shape[1]
     model = InterfaceGNN(
@@ -366,6 +427,10 @@ def main() -> None:
         dropout=args.dropout,
     )
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    train_targets_arr = np.array(
+        [float(g.y.item()) for g in dataset.get_split("train")]
+    )
+    loss_fn = build_loss_fn(train_targets_arr, args.loss_type)
 
     epoch_records: list[dict[str, object]] = []
     grad_logs: list[dict[str, dict[str, float]]] = []
@@ -378,12 +443,13 @@ def main() -> None:
             model,
             dataset.get_split("train"),
             optimizer,
+            loss_fn,
             track_grads=True,
         )
         epoch_metrics = {"epoch": epoch, "train_loss": train_loss}
         grad_logs.append(grad_stats)
         for split in ("train", "val", "test"):
-            metrics = evaluate(model, dataset.get_split(split))
+            metrics = evaluate(model, dataset.get_split(split), scaler=scaler)
             epoch_metrics.update(
                 {
                     f"{split}_mae": metrics["mae"],
