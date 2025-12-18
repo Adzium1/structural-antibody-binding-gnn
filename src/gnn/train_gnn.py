@@ -80,6 +80,7 @@ class InterfaceGNN(nn.Module):
         hidden_dim: int = 256,
         layers: int = 6,
         dropout: float = 0.2,
+        use_norm: bool = False,
     ):
         super().__init__()
         self.input_proj = nn.Linear(input_dim, hidden_dim)
@@ -108,9 +109,10 @@ class InterfaceGNN(nn.Module):
         self.res_lin = nn.ModuleList(
             [nn.Linear(hidden_dim, hidden_dim) for _ in range(layers)]
         )
-        self.norms = nn.ModuleList(
-            [nn.LayerNorm(hidden_dim) for _ in range(layers)]
-        )
+        if use_norm:
+            self.norms = nn.ModuleList([nn.LayerNorm(hidden_dim) for _ in range(layers)])
+        else:
+            self.norms = nn.ModuleList([nn.Identity() for _ in range(layers)])
         self.readout = nn.Linear(hidden_dim, 1)
         self._init_weights()
 
@@ -381,6 +383,8 @@ def overfit_debug_run(
     n_samples: int,
     epochs: int = 100,
     lr: float = 5e-3,
+    weight_decay: float = 0.0,
+    use_norm: bool = False,
 ) -> float:
     """
     Small-capacity test: can the model memorize a tiny subset?
@@ -396,8 +400,9 @@ def overfit_debug_run(
         hidden_dim=hidden_dim,
         layers=layers,
         dropout=dropout,
+        use_norm=use_norm,
     )
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     criterion = nn.MSELoss()
     for epoch in range(1, epochs + 1):
         losses: list[float] = []
