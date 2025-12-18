@@ -112,6 +112,17 @@ class InterfaceGNN(nn.Module):
             [nn.LayerNorm(hidden_dim) for _ in range(layers)]
         )
         self.readout = nn.Linear(hidden_dim, 1)
+        self._init_weights()
+
+    def _init_weights(self) -> None:
+        """
+        Kaiming initialization for stability with ReLU activations.
+        """
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.kaiming_normal_(module.weight, mode="fan_in", nonlinearity="relu")
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0.0)
 
     def forward(
         self,
@@ -172,8 +183,11 @@ def train_epoch(
         pred = model(
             graph.x, graph.edge_index, graph.edge_weight, graph.edge_attr
         )
-        loss = criterion(pred, graph.y)
+        pred_vec = pred.view(-1)
+        target_vec = graph.y.view(-1)
+        loss = criterion(pred_vec, target_vec)
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
         if track_grads:
             grad_stats = collect_grad_stats(model)
         optimizer.step()
@@ -392,8 +406,11 @@ def overfit_debug_run(
             pred = model(
                 graph.x, graph.edge_index, graph.edge_weight, graph.edge_attr
             )
-            loss = criterion(pred, graph.y)
+            pred_vec = pred.view(-1)
+            target_vec = graph.y.view(-1)
+            loss = criterion(pred_vec, target_vec)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
             optimizer.step()
             losses.append(float(loss.item()))
         if epoch % 20 == 0:
