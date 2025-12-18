@@ -74,22 +74,41 @@ class InterfaceGNN(nn.Module):
         self,
         input_dim: int,
         edge_attr_dim: int,
-        hidden_dim: int = 64,
-        layers: int = 2,
+        hidden_dim: int = 256,
+        layers: int = 6,
+        dropout: float = 0.2,
     ):
         super().__init__()
         self.input_proj = nn.Linear(input_dim, hidden_dim)
-        self.edge_mlp = nn.Sequential(
-            nn.Linear(edge_attr_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-        )
-        self.att_src = nn.Linear(hidden_dim, hidden_dim)
-        self.att_dst = nn.Linear(hidden_dim, hidden_dim)
-        self.msg_lin = nn.Linear(hidden_dim, hidden_dim)
-        self.res_lin = nn.Linear(hidden_dim, hidden_dim)
-        self.readout = nn.Linear(hidden_dim, 1)
         self.layers = layers
+        self.dropout = nn.Dropout(p=dropout)
+
+        self.edge_mlps = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Linear(edge_attr_dim, hidden_dim),
+                    nn.ReLU(),
+                    nn.Linear(hidden_dim, hidden_dim),
+                )
+                for _ in range(layers)
+            ]
+        )
+        self.att_src = nn.ModuleList(
+            [nn.Linear(hidden_dim, hidden_dim) for _ in range(layers)]
+        )
+        self.att_dst = nn.ModuleList(
+            [nn.Linear(hidden_dim, hidden_dim) for _ in range(layers)]
+        )
+        self.msg_lin = nn.ModuleList(
+            [nn.Linear(hidden_dim, hidden_dim) for _ in range(layers)]
+        )
+        self.res_lin = nn.ModuleList(
+            [nn.Linear(hidden_dim, hidden_dim) for _ in range(layers)]
+        )
+        self.norms = nn.ModuleList(
+            [nn.LayerNorm(hidden_dim) for _ in range(layers)]
+        )
+        self.readout = nn.Linear(hidden_dim, 1)
 
     def forward(
         self,
@@ -99,19 +118,21 @@ class InterfaceGNN(nn.Module):
         edge_attr: torch.Tensor,
     ) -> torch.Tensor:
         h = self.input_proj(x)
-        for _ in range(self.layers):
-            h = F.relu(h)
-            src = h[edge_index[0]]
-            dst = h[edge_index[1]]
-            bias = self.edge_mlp(edge_attr)
+        for idx in range(self.layers):
+            h_act = F.relu(h)
+            src = h_act[edge_index[0]]
+            dst = h_act[edge_index[1]]
+            bias = self.edge_mlps[idx](edge_attr)
             att = torch.sigmoid(
-                (self.att_src(src) + self.att_dst(dst) + bias).sum(dim=1, keepdim=True)
+                (self.att_src[idx](src) + self.att_dst[idx](dst) + bias).sum(dim=1, keepdim=True)
             )
             weight = edge_weight.unsqueeze(-1)
-            msg = self.msg_lin(src) * att * weight
-            agg = torch.zeros_like(h)
+            msg = self.msg_lin[idx](src) * att * weight
+            agg = torch.zeros_like(h_act)
             agg = agg.index_add(0, edge_index[1], msg)
-            h = F.relu(self.res_lin(h + agg))
+            updated = self.res_lin[idx](h_act + agg)
+            updated = self.dropout(F.relu(updated))
+            h = self.norms[idx](updated)
         graph_rep = h.mean(dim=0)
         return self.readout(graph_rep).squeeze(-1)
 
@@ -188,19 +209,31 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--epochs",
         type=int,
-        default=30,
+        default=80,
         help="Number of training epochs.",
     )
     parser.add_argument(
         "--hidden-dim",
         type=int,
-        default=64,
+        default=256,
         help="Hidden dimension for the message-passing layers.",
+    )
+    parser.add_argument(
+        "--layers",
+        type=int,
+        default=6,
+        help="Number of message-passing layers.",
+    )
+    parser.add_argument(
+        "--dropout",
+        type=float,
+        default=0.2,
+        help="Dropout probability applied after each layer.",
     )
     parser.add_argument(
         "--lr",
         type=float,
-        default=1e-3,
+        default=1e-4,
         help="Learning rate for Adam optimizer.",
     )
     parser.add_argument(
@@ -212,7 +245,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--patience",
         type=int,
-        default=5,
+        default=20,
         help="Early stopping patience (number of epochs without val R² improvement).",
     )
     return parser.parse_args()
@@ -272,8 +305,10 @@ def overfit_debug_run(
     input_dim: int,
     edge_attr_dim: int,
     hidden_dim: int,
+    layers: int,
+    dropout: float,
     n_samples: int,
-    epochs: int = 200,
+    epochs: int = 100,
     lr: float = 5e-3,
 ) -> float:
     """
@@ -288,6 +323,8 @@ def overfit_debug_run(
         input_dim=input_dim,
         edge_attr_dim=edge_attr_dim,
         hidden_dim=hidden_dim,
+        layers=layers,
+        dropout=dropout,
     )
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     criterion = nn.MSELoss()
@@ -325,6 +362,8 @@ def main() -> None:
         input_dim=input_dim,
         edge_attr_dim=edge_attr_dim,
         hidden_dim=args.hidden_dim,
+        layers=args.layers,
+        dropout=args.dropout,
     )
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
@@ -404,6 +443,8 @@ def main() -> None:
         input_dim=input_dim,
         edge_attr_dim=edge_attr_dim,
         hidden_dim=args.hidden_dim,
+        layers=args.layers,
+        dropout=args.dropout,
         n_samples=min(10, len(dataset.get_split("train"))),
         epochs=200,
         lr=max(args.lr, 5e-3),
