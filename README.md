@@ -68,3 +68,17 @@ Enhanced feature engineering adds per-mutation structural context (mutation/neig
 5. Execute `python -m src.analysis.compare_metrics` to summarize the test MAE/R² table alongside the best GNN epoch and to persist `3D-GNN-over-antibody-antigen/reports/comparison_plot.png`.
 
 Future steps should compare the new GNN metrics against the baselines and extend the structural graphs to SKEMPI 2.0 for transfer evaluation.
+
+## Benchmark snapshot (AB-Bind, test split)
+
+- Best tested GNN (v1): InterfaceGNN, hidden_dim=128, layers=3, dropout=0.0, target standardization + distribution-weighted loss.
+- Comparative results:
+
+| Model             | Test MAE | Test RMSE | Test R² |
+|-------------------|---------:|----------:|--------:|
+| Gradient boosting | 0.80     | 0.99      | 0.22    |
+| Random forest     | 0.89     | 1.07      | 0.01    |
+| Ridge             | >1.0     | >1.3      | <0      |
+| InterfaceGNN (v1) | 0.74     | 1.14      | -0.02   |
+
+Takeaway: the GNN pipeline trains and matches the MAE of strong tabular baselines but still trails in R²; next steps are richer node/edge features and light architecture tweaks on GPU (3–4 layers, 128–256 channels).
