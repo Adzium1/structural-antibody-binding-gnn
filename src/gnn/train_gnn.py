@@ -122,9 +122,14 @@ class InterfaceGNN(nn.Module):
         """
         for module in self.modules():
             if isinstance(module, nn.Linear):
-                nn.init.kaiming_normal_(module.weight, mode="fan_in", nonlinearity="relu")
-                if module.bias is not None:
-                    nn.init.constant_(module.bias, 0.0)
+                if module is self.readout:
+                    nn.init.normal_(module.weight, mean=0.0, std=0.01)
+                    if module.bias is not None:
+                        nn.init.constant_(module.bias, 0.0)
+                else:
+                    nn.init.kaiming_normal_(module.weight, mode="fan_in", nonlinearity="relu")
+                    if module.bias is not None:
+                        nn.init.constant_(module.bias, 0.0)
 
     def forward(
         self,
@@ -133,6 +138,10 @@ class InterfaceGNN(nn.Module):
         edge_weight: torch.Tensor,
         edge_attr: torch.Tensor,
     ) -> torch.Tensor:
+        # Clamp edge attributes and weights to control activation scale
+        edge_attr = torch.tanh(edge_attr)
+        edge_weight = torch.clamp(edge_weight, min=0.0, max=1.0)
+
         h = self.input_proj(x)
         for idx in range(self.layers):
             h_act = F.relu(h)
@@ -150,7 +159,8 @@ class InterfaceGNN(nn.Module):
             updated = self.dropout(F.relu(updated))
             h = self.norms[idx](updated)
         graph_rep = h.mean(dim=0)
-        return self.readout(graph_rep).squeeze(-1)
+        # Scale down the final output to avoid huge initial predictions
+        return (self.readout(graph_rep) / 50.0).squeeze(-1)
 
 
 def collect_grad_stats(model: nn.Module) -> dict[str, dict[str, float]]:
@@ -426,6 +436,48 @@ def overfit_debug_run(
     final_loss = float(np.mean(losses))
     print(f"[debug overfit] final loss={final_loss:.6f}")
     return final_loss
+
+
+def ultra_minimal_probe(
+    dataset: GraphCollection,
+    input_dim: int,
+    edge_attr_dim: int,
+    hidden_dim: int = 64,
+    layers: int = 2,
+    epochs: int = 5,
+    lr: float = 1e-4,
+    weight_decay: float = 1e-4,
+) -> float:
+    """
+    Fast probe on a single smallest graph to ensure the training loop is functional.
+    """
+    if not dataset.graphs:
+        raise ValueError("Dataset is empty.")
+    graph = dataset.graphs[0]
+    model = InterfaceGNN(
+        input_dim=input_dim,
+        edge_attr_dim=edge_attr_dim,
+        hidden_dim=hidden_dim,
+        layers=layers,
+        dropout=0.0,
+        use_norm=False,
+    )
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+    model.train()
+    for epoch in range(epochs):
+        optimizer.zero_grad()
+        pred = model(graph.x, graph.edge_index, graph.edge_weight, graph.edge_attr).view(-1)
+        target = graph.y.view(-1)
+        loss = F.mse_loss(pred, target)
+        if torch.isnan(loss):
+            print(f"[ultra probe] NaN at epoch {epoch}")
+            return float("inf")
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+        optimizer.step()
+        if epoch % max(1, epochs // 5) == 0:
+            print(f"[ultra probe] epoch {epoch} loss={loss.item():.6f}")
+    return float(loss.item())
 
 
 def main() -> None:
