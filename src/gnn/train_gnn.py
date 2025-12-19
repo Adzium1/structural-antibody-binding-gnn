@@ -255,7 +255,7 @@ def evaluate(
     return {"mae": mae, "rmse": rmse, "r2": r2}
 
 
-def parse_arguments() -> argparse.Namespace:
+def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train a simple GNN on AB-Bind interface graphs.")
     parser.add_argument("--graphs", type=Path, default=GRAPH_DATA_PATH)
     parser.add_argument("--epochs", type=int, default=50)
@@ -278,7 +278,7 @@ def parse_arguments() -> argparse.Namespace:
         default="dist_weighted",
         help="Loss function variant.",
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def plot_training_curves(
@@ -398,8 +398,8 @@ def ultra_minimal_probe(
     return float(loss.item())
 
 
-def main() -> None:
-    args = parse_arguments()
+def main(argv: list[str] | None = None) -> None:
+    args = parse_arguments(argv)
     dataset = GraphCollection(args.graphs)
     sample_graphs = dataset.graphs
     if not sample_graphs:
