@@ -28,6 +28,34 @@ EDGE_RADIUS = 8.0
 INTERFACE_THRESHOLD = 5.0
 SOLVENT_RADIUS = 5.0
 
+# A small set of engineered features (from ab_bind_features.csv) to inject into node vectors.
+# These were useful for the tabular baselines; we append the same vector to every node
+# of a graph so the model has access to global mutation-level context.
+ENGINEERED_COLUMNS = [
+    "hydrophobicity_mean",
+    "hydrophobicity_std",
+    "volume_mean",
+    "volume_std",
+    "charge_mean",
+    "charge_std",
+    "polarity_mean",
+    "polarity_std",
+    "mutation_count",
+    "unique_chain_count",
+]
+
+
+def extract_engineered_features(row: pd.Series) -> np.ndarray:
+    values = []
+    for col in ENGINEERED_COLUMNS:
+        val = row.get(col, 0.0)
+        try:
+            val = float(val)
+        except (TypeError, ValueError):
+            val = 0.0
+        values.append(val)
+    return np.array(values, dtype=float)
+
 
 def build_graph(
     row: pd.Series,
@@ -69,6 +97,7 @@ def build_graph(
     node_features = []
     node_positions = []
     solvent_props = []
+    engineered_vec = extract_engineered_features(row)
     for idx in node_indices:
         residue = structure.residues[idx]
         one_hot = [
@@ -126,6 +155,7 @@ def build_graph(
                     dtype=float,
                 ),
                 coords.astype(float),
+                engineered_vec,
             ]
         )
         solvent_props.append(solvent_proxy)
