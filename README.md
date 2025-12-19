@@ -82,3 +82,20 @@ Future steps should compare the new GNN metrics against the baselines and extend
 | InterfaceGNN (v1) | 0.74     | 1.14      | -0.02   |
 
 Takeaway: the GNN pipeline trains and matches the MAE of strong tabular baselines but still trails in R²; next steps are richer node/edge features and light architecture tweaks on GPU (3–4 layers, 128–256 channels).
+
+## Next-step plan (script by script)
+
+- `3D-GNN-over-antibody-antigen/reports/gnn_metrics.csv`  
+  Replace with a clean GPU run (InterfaceGNN 128d/3 layers, lr=1e-3, standardize targets, dist_weighted loss), then rerun the comparison plot.
+
+- `src/analysis/compare_gnn_vs_baselines.py`  
+  Run `python -m src.analysis.compare_gnn_vs_baselines` after updating metrics to generate `reports/compare_gnn_baselines.png` and the console table.
+
+- `src/data/build_interface_graphs.py` (v2 feature enrichment)  
+  Load `data/processed/ab_bind_features.csv` and inject physico-chemical features (hydrophobicity/volume/charge/polarity deltas, structural stats) into `node_features` (and optionally `edge_attr`) keyed by `sample_id`.
+
+- `src/gnn/train_gnn.py` / `InterfaceGNN`  
+  Keep 3–4 layers, 128–256 channels; continue using clamped edge_attr/weights and small readout. If graph features are enriched, adjust input dimensions accordingly.
+
+- Suggested GPU sweep (v2)  
+  hidden_dim ∈ {128, 256}, layers ∈ {3, 4}, lr ∈ {5e-4, 1e-3}, with target standardization + dist_weighted loss.
